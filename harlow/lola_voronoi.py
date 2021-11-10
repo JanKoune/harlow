@@ -314,13 +314,9 @@ def estimate_voronoi_volume(P, domain, n=100):
     return V, np.asarray(S)
 
 
-def hypercube_sampling(domain, n_samples, method="maximin"):
-    space_domain = []
-
-    for i in range(len(domain)):
-        space_domain.append(tuple(domain[i]))
-
-    space = Space(space_domain[i])
+def hypercube_sampling(domain: list, n_samples: int, method: str = "maximin"):
+    space_domain = tuple(domain[0])
+    space = Space(space_domain)
     lhs = Lhs(criterion=method, iterations=5000)
     samples = lhs.generate(space.dimensions, n_samples)
 
