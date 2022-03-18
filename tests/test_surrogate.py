@@ -43,7 +43,7 @@ def test_2D():
     plot = plot_function_custom(
         bohachevsky_2D,
         train_X,
-        y=gp.predict(train_X),
+        y_vec=gp.predict(train_X),
         plot_sample_locations=True,
         show=show_plot,
     )
@@ -127,7 +127,7 @@ def test_1D():
     plot = plot_function_custom(
         forresterEtAl,
         train_X.reshape(-1, 1),
-        y=gp.predict(train_X.reshape(-1, 1)),
+        y_vec=gp.predict(train_X.reshape(-1, 1)),
         plot_sample_locations=True,
         show=False,
     )
