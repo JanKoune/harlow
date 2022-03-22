@@ -15,10 +15,10 @@ import math
 import time
 from typing import Callable, Optional, Tuple
 
-import numba as nb
+# import numba as nb
 import numpy as np
 from loguru import logger
-from scipy.spatial.distance import cdist
+from scipy.spatial.distance import cdist, pdist, squareform
 from sklearn.metrics import mean_squared_error
 
 from harlow.helper_functions import latin_hypercube_sampling
@@ -32,8 +32,8 @@ from harlow.surrogate_model import Surrogate
 #  * improve logging
 #  * pretty timedelta: https://gist.github.com/thatalextaylor/7408395
 
-nopython = True
-fastmath = True
+# nopython = True
+# fastmath = True
 
 
 # -----------------------------------------------------
@@ -66,33 +66,6 @@ class LolaVoronoi(Sampler):
         self.metric = evaluation_metric
         self.verbose = verbose
 
-        # Internal storage for inspection
-        self.step_x = []
-        self.step_y = []
-        self.step_score = []
-        self.step_iter = []
-        self.step_fit_time = []
-        self.step_gen_time = []
-
-        # TODO:
-        #  * add a cleaned up metric (see below)
-        #  * add input consistency check & formatting input if needed
-        # if evaluation_metric == "r2":
-        #     self.metric = r2_score
-        # elif evaluation_metric == "mse":
-        #     self.metric = mean_squared_error
-        # elif evaluation_metric == "rmse":
-        #     self.metric = lambda x, y: math.sqrt(mean_squared_error(x, y))
-        #
-        # if np.ndim(self.test_X) == 1:
-        #     self.score[0] = (self.metric
-        #         self.test_y, self.surrogate_model.predict(self.test_X.reshape(-1, 1))
-        #     )
-        # else:
-        #     self.score[0] = self.metric(
-        #         self.test_y, self.surrogate_model.predict(self.test_X)
-        #     )
-
     def sample(
         self,
         n_initial_point: int = None,
@@ -118,7 +91,9 @@ class LolaVoronoi(Sampler):
             n_iter = 1000
 
         if stopping_criterium and not self.metric:
-            self.metric = lambda x, y: math.sqrt(mean_squared_error(x, y))
+            self.metric = lambda true, predict: math.sqrt(
+                mean_squared_error(true, predict)
+            )
 
         # ..........................................
         # Initial sample of points
@@ -213,6 +188,9 @@ class LolaVoronoi(Sampler):
             self.score = score
             self.iterations = ii
             if stopping_criterium:
+                score = self.metric(
+                    self.test_points_y, self.surrogate_model.predict(self.test_points_x)
+                )
                 logger.info(f"Evaluation metric score on provided testset: {score}")
                 if score <= stopping_criterium:
                     logger.info(f"Algorithm converged in {ii} iterations")
@@ -384,7 +362,7 @@ def best_neighborhoods(
     )
 
 
-@nb.jit(nopython=nopython, fastmath=fastmath, parallel=False, cache=False)
+# @nb.jit(nopython=nopython, fastmath=fastmath, parallel=False, cache=False)
 def best_neighborhoods_numba(
     points_x: np.ndarray,
     all_neighbor_point_idxs_combinations: np.ndarray,
@@ -424,42 +402,38 @@ def best_neighborhoods_numba(
 
     # TODO: both loops are completely independent hence parallelizable
     # for ii in nb.prange(n_point):
-    # This loop is executed for each point in the domain
     for ii in range(n_point):
         reference_point_x = np.expand_dims(points_x[ii], 0)
         # consider only the valid neighborhoods: the ones that do not contain
         # `reference_point_x`
         idx_valid_neighborhoods = np.where(
-            np_all(all_neighbor_point_idxs_combinations != ii, axis=1)
+            # np_all(all_neighbor_point_idxs_combinations != ii, axis=1)
+            np.all(all_neighbor_point_idxs_combinations != ii, axis=1)
         )[0]
 
-        if ignore_old_neighborhoods:
-            # Find index of old points
-            arr_valid_neighbourhoods = all_neighbor_point_idxs_combinations[
-                idx_valid_neighborhoods
+        # consider only the new neighborhoods that are not too far away.
+        # neighborhoods that contain a point farther away the median Euclidean distance
+        # are dismissed.
+        # section [5] of the paper
+        # TODO: Check and discuss whether this 'treshold' defined by the median of
+        #  distances is the best heuristic.
+        ignore_far_neighborhoods = True
+        if ignore_far_neighborhoods:
+            all_neighbor_points_x = points_x[
+                all_neighbor_point_idxs_combinations[idx_valid_neighborhoods], :
             ]
-            arr_new_point_no = np.arange(
-                n_point_last_iter, n_point_last_iter + n_new_points
-            )
+            dists = np.linalg.norm(all_neighbor_points_x - reference_point_x, axis=-1)
+            med = np.median(dists)
+            idx_valid_neighborhoods = idx_valid_neighborhoods[
+                np.all(dists <= med, axis=-1)
+            ]
 
-            # Remove entries from valid neighborhoods that
-            # do not contain a new point
-            arr_valid_neighbourhoods_mask = np.repeat(
-                False, len(arr_valid_neighbourhoods)
-            )
-            for _idx_pt, pt in enumerate(arr_new_point_no):
-
-                # Mask valid neighbourhoods (i.e. neighbourhoods that contain
-                # the current new point). Terminate early if all elements
-                # in mask array are true.
-                arr_valid_neighbourhoods_mask = np.bitwise_or(
-                    arr_valid_neighbourhoods_mask,
-                    np_any(arr_valid_neighbourhoods == pt, axis=1),
-                )
-                if np.all(arr_valid_neighbourhoods_mask):
-                    break
-            arr_valid_neighbourhoods = arr_valid_neighbourhoods[
-                arr_valid_neighbourhoods_mask
+        # compute the neighbourhood_score (`ns`) for each neighborhood
+        # for jj in nb.prange(len(idx_valid_neighborhoods)):
+        for jj in range(len(idx_valid_neighborhoods)):
+            idx_valid_neighborhood = idx_valid_neighborhoods[jj]
+            neighbor_points_x = points_x[
+                all_neighbor_point_idxs_combinations[idx_valid_neighborhood], :
             ]
             idx_valid_neighborhoods = np.where(arr_valid_neighbourhoods_mask)[0]
 
@@ -520,7 +494,7 @@ def lola_voronoi_score(
     return relative_volumes + nonlinearity_measures / np.sum(nonlinearity_measures)
 
 
-@nb.jit(nopython=nopython, fastmath=fastmath, cache=False)
+# @nb.jit(nopython=nopython, fastmath=fastmath, cache=False)
 def neighborhood_score(
     neighbor_points_x: np.ndarray, reference_point_x: np.ndarray
 ) -> Tuple[float, float]:
@@ -560,20 +534,15 @@ def neighborhood_score(
         # neighbor_distances = squareform(pdist(neighbor_points_x, metric="euclidean"))
         # np.fill_diagonal(neighbor_distances, np.inf)
         # min_neighbor_distances = np.min(neighbor_distances, axis=1)
-        #  neighbor_distances = pdist_full_matrix(neighbor_points_x)
-
-        # This should be an equivalent alternative to squareform + pdist
-        # that also works with numba. Based on this stackoverflow answer:
-        # https://stackoverflow.com/questions/60839615/
-        # efficiently-calculating-a-euclidean-dist-matrix-in-numpy
-        # TODO: Check
+        # neighbor_distances = pdist_full_matrix(neighbor_points_x)
+        neighbor_distances = squareform(pdist(neighbor_points_x, metric="euclidean"))
         # TODO: would be good to avoid np.max
         # neighbor_distances = squareform(pdist(neighbor_points_x, metric="euclidean"))
 
         neighbor_distances = euclidean_distance(neighbor_points_x)
         np.fill_diagonal(neighbor_distances, np.max(neighbor_distances))
         # min_neighbor_distances = np_min(neighbor_distances, axis=1)
-        min_neighbor_distances = np_min(neighbor_distances, axis=1)
+        min_neighbor_distances = np.min(neighbor_distances, axis=1)
         adhesion = np.mean(min_neighbor_distances)
         # Eq(4.5) of [1]
         cross_polytope_ratio = adhesion / (np.sqrt(2) * cohesion)
